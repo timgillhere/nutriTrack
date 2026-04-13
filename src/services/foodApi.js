@@ -1,4 +1,9 @@
-const OFF_BASE = 'https://world.openfoodfacts.org'
+// Product API  — barcodes via world.openfoodfacts.org/api/v0  (CORS: ✓)
+//              — search  via /off-search (proxied through Vite in dev,
+//                vercel.json rewrite in prod) because search.openfoodfacts.org
+//                omits Access-Control-Allow-Origin and is CORS-blocked in browsers.
+const OFF_BASE    = 'https://world.openfoodfacts.org'
+const SEARCH_PATH = '/off-search'   // proxied → https://search.openfoodfacts.org/search
 
 // ─── Search result cache ───────────────────────────────────────────────────
 const CACHE_KEY = 'nutritrack_search_cache'
@@ -10,7 +15,6 @@ const loadCache = () => {
 }
 
 const saveCache = (cache) => {
-  // Evict oldest entries if over 200
   const entries = Object.entries(cache)
   let pruned = cache
   if (entries.length > 200) {
@@ -19,8 +23,6 @@ const saveCache = (cache) => {
   try { localStorage.setItem(CACHE_KEY, JSON.stringify(pruned)) } catch { /* storage full */ }
 }
 
-// Proactively remove expired entries — call once on app startup so stale data
-// doesn't accumulate indefinitely in localStorage
 export const pruneSearchCache = () => {
   const cache = loadCache()
   const now = Date.now()
@@ -30,7 +32,9 @@ export const pruneSearchCache = () => {
   try { localStorage.setItem(CACHE_KEY, JSON.stringify(pruned)) } catch { /* ignore */ }
 }
 
-// Parse raw Open Food Facts product into a clean nutrition object
+// ─── Parse a raw OFF product into a clean nutrition object ────────────────
+// Handles both the v0 barcode format (brands: string)
+// and the new search API format  (brands: string[])
 const parseProduct = (product) => {
   const n = product.nutriments || {}
   const per100 = (key) => parseFloat(n[`${key}_100g`] ?? n[key] ?? 0) || 0
@@ -38,22 +42,24 @@ const parseProduct = (product) => {
   return {
     barcode: product.code || product._id || '',
     name: product.product_name || product.product_name_en || 'Unknown product',
-    brand: product.brands || '',
+    brand: Array.isArray(product.brands)
+      ? product.brands.filter(Boolean).join(', ')
+      : (product.brands || ''),
     imageThumbnail: product.image_thumb_url || product.image_small_url || '',
     servingSize: parseFloat(product.serving_size) || 100,
     servingUnit: 'g',
     per100g: {
-      kcal: per100('energy-kcal') || Math.round(per100('energy') / 4.184),
+      kcal:    per100('energy-kcal') || Math.round(per100('energy') / 4.184),
       protein: per100('proteins'),
-      carbs: per100('carbohydrates'),
-      fat: per100('fat'),
-      fiber: per100('fiber'),
-      sugar: per100('sugars'),
+      carbs:   per100('carbohydrates'),
+      fat:     per100('fat'),
+      fiber:   per100('fiber'),
+      sugar:   per100('sugars'),
     },
   }
 }
 
-// Look up a product by barcode
+// ─── Barcode lookup (v0 endpoint — still working) ─────────────────────────
 export const fetchByBarcode = async (barcode) => {
   const res = await fetch(`${OFF_BASE}/api/v0/product/${barcode}.json`)
   const data = await res.json()
@@ -61,7 +67,7 @@ export const fetchByBarcode = async (barcode) => {
   return parseProduct(data.product)
 }
 
-// Search by text query — results are cached in localStorage for 7 days
+// ─── Text search (new Meilisearch endpoint) ───────────────────────────────
 export const searchFood = async (query, page = 1) => {
   const cacheKey = `${query.toLowerCase().trim()}__p${page}`
   const cache = loadCache()
@@ -69,31 +75,29 @@ export const searchFood = async (query, page = 1) => {
   if (hit && Date.now() - hit.ts < CACHE_TTL) return hit.data
 
   const params = new URLSearchParams({
-    search_terms: query,
-    search_simple: 1,
-    action: 'process',
-    json: 1,
-    page,
+    q: query,
     page_size: 20,
-    fields: 'code,product_name,product_name_en,brands,image_thumb_url,image_small_url,nutriments,serving_size',
+    page,
+    fields: 'code,product_name,brands,image_thumb_url,image_small_url,nutriments,serving_size',
   })
-  const res = await fetch(`${OFF_BASE}/cgi/search.pl?${params}`)
+  const res = await fetch(`${SEARCH_PATH}?${params}`)
   const data = await res.json()
-  const results = (data.products || [])
-    .filter(p => p.product_name)
+  const results = (data.hits || [])
+    .filter(p => p.product_name && p.nutriments)  // skip entries with no nutrition data
     .map(parseProduct)
+    .filter(p => p.per100g.kcal > 0)              // skip zero-calorie ghost entries
 
   saveCache({ ...cache, [cacheKey]: { ts: Date.now(), data: results } })
   return results
 }
 
-// Calculate macros for a given food at a specific serving size
+// ─── Macro calculator ─────────────────────────────────────────────────────
 export const calcNutrition = (food, servingGrams) => {
   const ratio = servingGrams / 100
   return {
-    kcal: Math.round(food.per100g.kcal * ratio),
+    kcal:    Math.round(food.per100g.kcal    * ratio),
     protein: Math.round(food.per100g.protein * ratio * 10) / 10,
-    carbs: Math.round(food.per100g.carbs * ratio * 10) / 10,
-    fat: Math.round(food.per100g.fat * ratio * 10) / 10,
+    carbs:   Math.round(food.per100g.carbs   * ratio * 10) / 10,
+    fat:     Math.round(food.per100g.fat     * ratio * 10) / 10,
   }
 }

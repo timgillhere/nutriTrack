@@ -1,6 +1,6 @@
 import { initializeApp } from 'firebase/app'
 import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut } from 'firebase/auth'
-import { getFirestore, doc, collection, addDoc, deleteDoc, getDocs, setDoc, getDoc, query, orderBy, updateDoc } from 'firebase/firestore'
+import { getFirestore, doc, collection, addDoc, deleteDoc, getDocs, setDoc, getDoc, query, orderBy } from 'firebase/firestore'
 
 // Replace these values with your Firebase project config
 // from https://console.firebase.google.com → Project settings → Your apps → SDK setup
@@ -50,6 +50,28 @@ export const getUserProfile = async (uid) => {
 // merge:true so partial updates (e.g. saving aiPrompt) don't wipe other fields
 export const saveUserProfile = async (uid, profile) => {
   await setDoc(doc(db, 'users', uid, 'profile', 'goals'), profile, { merge: true })
+}
+
+// Recipes  ─  path: users/{uid}/recipes/{recipeId}
+export const getRecipes = async (uid) => {
+  const ref = collection(db, 'users', uid, 'recipes')
+  const snap = await getDocs(query(ref, orderBy('createdAt', 'desc')))
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }))
+}
+
+export const saveRecipe = async (uid, recipe) => {
+  if (recipe.id) {
+    const { id, ...data } = recipe
+    await setDoc(doc(db, 'users', uid, 'recipes', id), data)
+    return id
+  }
+  const ref = collection(db, 'users', uid, 'recipes')
+  const docRef = await addDoc(ref, { ...recipe, createdAt: Date.now() })
+  return docRef.id
+}
+
+export const deleteRecipe = async (uid, recipeId) => {
+  await deleteDoc(doc(db, 'users', uid, 'recipes', recipeId))
 }
 
 // Fetch diary entries for multiple dates — returns [{date, entries}] in date order

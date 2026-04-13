@@ -5,6 +5,7 @@ import DiaryDay from './components/DiaryDay'
 import MacroRing from './components/MacroRing'
 import HistoryView from './components/HistoryView'
 import ProfileView from './components/ProfileView'
+import RecipesView from './components/RecipesView'
 import BottomNav from './components/BottomNav'
 import ExportModal from './components/ExportModal'
 import { pruneSearchCache } from './services/foodApi'
@@ -52,10 +53,11 @@ export default function App() {
 
       {/* Scrollable content */}
       <main className="flex-1 overflow-hidden flex flex-col" style={{ paddingBottom: 64 }}>
-        {tab === 'diary'     && <DiaryDay />}
-        {tab === 'nutrition' && <MacroRing />}
-        {tab === 'history'   && <HistoryView />}
-        {tab === 'profile'   && <ProfileView />}
+        {tab === 'diary'      && <DiaryDay />}
+        {tab === 'recipes'    && <RecipesView />}
+        {tab === 'nutrition'  && <MacroRing />}
+        {tab === 'history'    && <HistoryView />}
+        {tab === 'profile'    && <ProfileView />}
       </main>
 
       <BottomNav active={tab} onChange={setTab} />

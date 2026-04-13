@@ -1,78 +1,38 @@
-import { useState, useRef, useCallback, useEffect } from 'react'
-import { searchFood } from '../services/foodApi'
-import { getRecentFoods, mergeWithRecents } from '../services/recentFoods'
+import { useState } from 'react'
+import { useFoodSearch } from '../hooks/useFoodSearch'
+import CreateFoodModal from './CreateFoodModal'
 
 export default function FoodSearch({ onSelect }) {
-  const [query, setQuery] = useState('')
-  const [results, setResults] = useState([])
-  const [loading, setLoading] = useState(false)
-  const [searched, setSearched] = useState(false)
-  const debounceRef = useRef(null)
+  const { query, results, loading, searched, search } = useFoodSearch()
+  const [creating, setCreating] = useState(false)
 
-  // Show recent foods immediately when sheet opens
-  useEffect(() => {
-    const recent = getRecentFoods()
-    if (recent.length) setResults(recent.map(f => ({ ...f, _isRecent: true })))
-  }, [])
+  const hasRecents   = results.some(r => r._isRecent)
+  const noQuery      = !query.trim()
+  const noResults    = !loading && searched && results.length === 0
+  const hasResults   = results.length > 0
 
-  const handleChange = useCallback((e) => {
-    const val = e.target.value
-    setQuery(val)
-    clearTimeout(debounceRef.current)
-
-    if (!val.trim()) {
-      const recent = getRecentFoods()
-      setResults(recent.map(f => ({ ...f, _isRecent: true })))
-      setSearched(false)
-      return
-    }
-
-    // Instantly surface matching recents while API loads
-    const q = val.toLowerCase()
-    const recent = getRecentFoods()
-    const matchingRecents = recent
-      .filter(f => {
-        const name = (f.name || '').toLowerCase()
-        const brand = (f.brand || '').toLowerCase()
-        return name.includes(q) || brand.includes(q)
-      })
-      .map(f => ({ ...f, _isRecent: true }))
-
-    if (matchingRecents.length) setResults(matchingRecents)
-
-    debounceRef.current = setTimeout(async () => {
-      setLoading(true)
-      try {
-        const apiData = await searchFood(val.trim())
-        setResults(mergeWithRecents(val.trim(), apiData))
-        setSearched(true)
-      } catch {
-        // Keep showing whatever recents we have
-        setSearched(true)
-      } finally {
-        setLoading(false)
-      }
-    }, 500)
-  }, [])
-
-  const hasRecents = results.some(r => r._isRecent)
-  const noQuery = !query.trim()
+  const handleCreate = (food) => {
+    setCreating(false)
+    onSelect(food)
+  }
 
   return (
     <div className="flex flex-col flex-1 overflow-hidden">
 
-      {/* Search input — pinned at top, never scrolls away */}
+      {/* Search input — pinned at top */}
       <div className="shrink-0 px-4 pb-3 pt-1">
         <div className="relative">
-          <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+          <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400 pointer-events-none"
+            fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
           </svg>
           <input
             autoFocus
             type="search"
             placeholder="Search foods…"
             value={query}
-            onChange={handleChange}
+            onChange={e => search(e.target.value)}
             className="w-full pl-10 pr-4 py-3 bg-gray-100 rounded-xl text-base focus:outline-none focus:ring-2 focus:ring-green-400 focus:bg-white transition-colors"
           />
           {loading && (
@@ -80,8 +40,7 @@ export default function FoodSearch({ onSelect }) {
           )}
         </div>
 
-        {/* Section label */}
-        {(hasRecents) && (
+        {hasRecents && (
           <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mt-2 px-1">
             {noQuery ? 'Recently used' : 'Recent matches · more results below'}
           </p>
@@ -91,7 +50,7 @@ export default function FoodSearch({ onSelect }) {
       {/* Scrollable results */}
       <div className="flex-1 overflow-y-auto px-4 space-y-2 pb-6">
 
-        {/* Empty state — no query, no recents */}
+        {/* Empty state — no query typed yet */}
         {noQuery && results.length === 0 && (
           <div className="pt-12 text-center">
             <p className="text-4xl mb-3">🔍</p>
@@ -100,15 +59,22 @@ export default function FoodSearch({ onSelect }) {
           </div>
         )}
 
-        {/* No results after search */}
-        {!loading && searched && results.length === 0 && (
-          <div className="pt-12 text-center">
-            <p className="text-gray-500 text-sm">No results for "{query}"</p>
-            <p className="text-gray-400 text-xs mt-1">Try a different search term</p>
+        {/* No results — offer to create */}
+        {noResults && (
+          <div className="pt-10 text-center">
+            <p className="text-3xl mb-3">🤷</p>
+            <p className="text-gray-600 text-sm font-medium mb-1">No results for "{query}"</p>
+            <p className="text-gray-400 text-xs mb-5">Not in the database? Add it manually.</p>
+            <button
+              onClick={() => setCreating(true)}
+              className="bg-green-500 hover:bg-green-600 active:bg-green-700 text-white text-sm font-semibold px-5 py-2.5 rounded-xl transition-colors"
+            >
+              Create "{query}"
+            </button>
           </div>
         )}
 
-        {/* Divider between recents and API results */}
+        {/* Results list */}
         {results.map((food, i) => {
           const isFirstApiResult = !food._isRecent && i > 0 && results[i - 1]?._isRecent
           return (
@@ -122,13 +88,31 @@ export default function FoodSearch({ onSelect }) {
             </div>
           )
         })}
+
+        {/* "Can't find it?" footer — shown when there are results but maybe not the right one */}
+        {hasResults && searched && (
+          <button
+            onClick={() => setCreating(true)}
+            className="w-full mt-1 py-3 text-xs text-gray-400 hover:text-gray-600 transition-colors"
+          >
+            Can't find what you're looking for? Add it manually →
+          </button>
+        )}
       </div>
+
+      {/* Custom food creation sheet */}
+      {creating && (
+        <CreateFoodModal
+          defaultName={query}
+          onSelect={handleCreate}
+          onClose={() => setCreating(false)}
+        />
+      )}
     </div>
   )
 }
 
 function FoodRow({ food, onSelect }) {
-  // Guard: if somehow per100g is missing (e.g. old stored data), fall back to zeros
   const per100g = food.per100g || { kcal: 0, protein: 0 }
 
   return (

@@ -41,7 +41,8 @@ export default function DiaryDay() {
   }
 
   const handleAdded = (newEntry) => {
-    setEntries(prev => [...prev, newEntry])
+    // Accept a single entry or an array (bulk-add from recipe)
+    setEntries(prev => Array.isArray(newEntry) ? [...prev, ...newEntry] : [...prev, newEntry])
     setAddingMeal(null)
   }
 
