@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { calcNutrition } from '../services/foodApi'
+import { recordRecentFood } from '../services/recentFoods'
 
 const MEALS = [
   { id: 'breakfast', label: 'Breakfast', emoji: '🌅' },
@@ -29,6 +30,7 @@ export default function AddFoodModal({ food, defaultMeal = 'breakfast', onAdd, o
         meal,
         ...nutrition,
       })
+      recordRecentFood(food)
     } finally {
       setSaving(false)
     }
