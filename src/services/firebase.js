@@ -1,6 +1,6 @@
 import { initializeApp } from 'firebase/app'
 import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut } from 'firebase/auth'
-import { getFirestore, doc, collection, addDoc, deleteDoc, getDocs, setDoc, getDoc, query, orderBy } from 'firebase/firestore'
+import { getFirestore, doc, collection, addDoc, deleteDoc, getDocs, setDoc, getDoc, query, orderBy, updateDoc } from 'firebase/firestore'
 
 // Replace these values with your Firebase project config
 // from https://console.firebase.google.com → Project settings → Your apps → SDK setup
@@ -47,6 +47,15 @@ export const getUserProfile = async (uid) => {
   return snap.exists() ? snap.data() : { calorieGoal: 2000, proteinGoal: 150 }
 }
 
+// merge:true so partial updates (e.g. saving aiPrompt) don't wipe other fields
 export const saveUserProfile = async (uid, profile) => {
-  await setDoc(doc(db, 'users', uid, 'profile', 'goals'), profile)
+  await setDoc(doc(db, 'users', uid, 'profile', 'goals'), profile, { merge: true })
+}
+
+// Fetch diary entries for multiple dates — returns [{date, entries}] in date order
+export const getDiaryEntriesForDates = async (uid, dates) => {
+  const results = await Promise.all(
+    dates.map(date => getDiaryEntries(uid, date).then(entries => ({ date, entries })))
+  )
+  return results.sort((a, b) => a.date.localeCompare(b.date))
 }

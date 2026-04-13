@@ -104,7 +104,7 @@ export default function FoodSearch({ onSelect }) {
         {!loading && searched && results.length === 0 && (
           <div className="pt-12 text-center">
             <p className="text-gray-500 text-sm">No results for "{query}"</p>
-            <p className="text-gray-400 text-xs mt-1">Try a different term or scan the barcode</p>
+            <p className="text-gray-400 text-xs mt-1">Try a different search term</p>
           </div>
         )}
 

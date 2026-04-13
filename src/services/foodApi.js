@@ -1,5 +1,35 @@
 const OFF_BASE = 'https://world.openfoodfacts.org'
 
+// ─── Search result cache ───────────────────────────────────────────────────
+const CACHE_KEY = 'nutritrack_search_cache'
+const CACHE_TTL = 7 * 24 * 60 * 60 * 1000 // 7 days
+
+const loadCache = () => {
+  try { return JSON.parse(localStorage.getItem(CACHE_KEY)) || {} }
+  catch { return {} }
+}
+
+const saveCache = (cache) => {
+  // Evict oldest entries if over 200
+  const entries = Object.entries(cache)
+  let pruned = cache
+  if (entries.length > 200) {
+    pruned = Object.fromEntries(entries.sort((a, b) => b[1].ts - a[1].ts).slice(0, 160))
+  }
+  try { localStorage.setItem(CACHE_KEY, JSON.stringify(pruned)) } catch { /* storage full */ }
+}
+
+// Proactively remove expired entries — call once on app startup so stale data
+// doesn't accumulate indefinitely in localStorage
+export const pruneSearchCache = () => {
+  const cache = loadCache()
+  const now = Date.now()
+  const pruned = Object.fromEntries(
+    Object.entries(cache).filter(([, v]) => now - v.ts < CACHE_TTL)
+  )
+  try { localStorage.setItem(CACHE_KEY, JSON.stringify(pruned)) } catch { /* ignore */ }
+}
+
 // Parse raw Open Food Facts product into a clean nutrition object
 const parseProduct = (product) => {
   const n = product.nutriments || {}
@@ -31,8 +61,13 @@ export const fetchByBarcode = async (barcode) => {
   return parseProduct(data.product)
 }
 
-// Search by text query
+// Search by text query — results are cached in localStorage for 7 days
 export const searchFood = async (query, page = 1) => {
+  const cacheKey = `${query.toLowerCase().trim()}__p${page}`
+  const cache = loadCache()
+  const hit = cache[cacheKey]
+  if (hit && Date.now() - hit.ts < CACHE_TTL) return hit.data
+
   const params = new URLSearchParams({
     search_terms: query,
     search_simple: 1,
@@ -44,9 +79,12 @@ export const searchFood = async (query, page = 1) => {
   })
   const res = await fetch(`${OFF_BASE}/cgi/search.pl?${params}`)
   const data = await res.json()
-  return (data.products || [])
+  const results = (data.products || [])
     .filter(p => p.product_name)
     .map(parseProduct)
+
+  saveCache({ ...cache, [cacheKey]: { ts: Date.now(), data: results } })
+  return results
 }
 
 // Calculate macros for a given food at a specific serving size
