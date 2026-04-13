@@ -2,40 +2,36 @@ import { useEffect, useRef, useState } from 'react'
 import { Html5Qrcode } from 'html5-qrcode'
 
 /**
- * BarcodeDetector support matrix:
- *   Chrome / Edge (Android + desktop)  ✅  real-time
- *   Safari 17.4+ (iOS + macOS)         ✅  real-time
- *   Firefox                            ❌  → photo fallback
- *   Chrome on iOS                      ❌  (uses WebKit < 17.4 on older devices) → photo fallback
+ * Strategy:
+ * 1. Always open the rear camera via getUserMedia → show live <video>
+ * 2. If BarcodeDetector available (Chrome Android, Safari 17.4+) → scan frames via native API
+ * 3. Otherwise → capture frames to canvas every 300ms → scan with Html5Qrcode.scanFile
+ *    (same live preview, just JS-based decoding)
  *
- * Photo fallback: user taps "Take Photo", selects/captures image,
- * html5-qrcode scans the static image file. Works on every browser.
+ * This avoids html5-qrcode's own video management, which causes the black screen.
  */
 
-const EAN_FORMATS = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'itf']
+const FORMATS = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'itf']
 
 export default function BarcodeScanner({ onDetected, onClose }) {
   const videoRef = useRef(null)
+  const canvasRef = useRef(null)
   const streamRef = useRef(null)
+  const timerRef = useRef(null)
   const rafRef = useRef(null)
   const doneRef = useRef(false)
+  const scannerRef = useRef(null)
 
-  const [mode, setMode] = useState(null)  // 'realtime' | 'photo' | null
   const [error, setError] = useState('')
-  const [photoLoading, setPhotoLoading] = useState(false)
-  const fileInputRef = useRef(null)
 
   useEffect(() => {
-    if ('BarcodeDetector' in window) {
-      startRealtime()
-    } else {
-      setMode('photo')
-    }
-    return stop
+    startCamera()
+    return cleanup
   }, [])
 
-  const stop = () => {
+  const cleanup = () => {
     doneRef.current = true
+    clearInterval(timerRef.current)
     cancelAnimationFrame(rafRef.current)
     streamRef.current?.getTracks().forEach(t => t.stop())
   }
@@ -43,66 +39,84 @@ export default function BarcodeScanner({ onDetected, onClose }) {
   const finish = (code) => {
     if (doneRef.current) return
     doneRef.current = true
-    stop()
+    cleanup()
     onDetected(code)
   }
 
-  // ── Real-time path (BarcodeDetector + getUserMedia) ───────────────────────
-  const startRealtime = async () => {
-    setMode('realtime')
+  const startCamera = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } },
         audio: false,
       })
       streamRef.current = stream
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream
-        await videoRef.current.play()
-      }
 
-      const detector = new window.BarcodeDetector({ formats: EAN_FORMATS })
+      const video = videoRef.current
+      if (!video) return
+      video.srcObject = stream
+      await video.play()
 
-      const tick = async () => {
-        if (doneRef.current) return
-        if (videoRef.current?.readyState >= 2) {
-          try {
-            const found = await detector.detect(videoRef.current)
-            if (found.length) { finish(found[0].rawValue); return }
-          } catch { /* no result this frame */ }
-        }
-        rafRef.current = requestAnimationFrame(tick)
+      if ('BarcodeDetector' in window) {
+        scanWithNativeAPI()
+      } else {
+        scanWithFrameCapture()
       }
-      rafRef.current = requestAnimationFrame(tick)
     } catch (err) {
       setError(describeError(err))
     }
   }
 
-  // ── Photo fallback (file input → Html5Qrcode.scanFile) ────────────────────
-  const handlePhoto = async (e) => {
-    const file = e.target.files?.[0]
-    if (!file) return
-    setPhotoLoading(true)
-    try {
-      const scanner = new Html5Qrcode('_offscreen_scanner_')
-      const result = await scanner.scanFile(file, false)
-      finish(result)
-    } catch {
-      setError('No barcode found in that photo — try again closer to the barcode, with good lighting.')
-      setPhotoLoading(false)
+  // ── Native BarcodeDetector (fastest) ──────────────────────────────────────
+  const scanWithNativeAPI = () => {
+    const detector = new window.BarcodeDetector({ formats: FORMATS })
+    const tick = async () => {
+      if (doneRef.current) return
+      const video = videoRef.current
+      if (video?.readyState >= 2) {
+        try {
+          const results = await detector.detect(video)
+          if (results.length) { finish(results[0].rawValue); return }
+        } catch { /* no result this frame */ }
+      }
+      rafRef.current = requestAnimationFrame(tick)
     }
-    // reset input so the same file can be retried
-    if (fileInputRef.current) fileInputRef.current.value = ''
+    rafRef.current = requestAnimationFrame(tick)
+  }
+
+  // ── Frame capture fallback (all other browsers) ───────────────────────────
+  const scanWithFrameCapture = () => {
+    // Html5Qrcode needs a DOM element id even for scanFile
+    scannerRef.current = new Html5Qrcode('_qr_hidden_', { verbose: false })
+
+    timerRef.current = setInterval(async () => {
+      if (doneRef.current) return
+      const video = videoRef.current
+      const canvas = canvasRef.current
+      if (!video || !canvas || video.readyState < 2) return
+
+      canvas.width = video.videoWidth
+      canvas.height = video.videoHeight
+      canvas.getContext('2d').drawImage(video, 0, 0)
+
+      canvas.toBlob(async (blob) => {
+        if (!blob || doneRef.current) return
+        const file = new File([blob], 'f.jpg', { type: 'image/jpeg' })
+        try {
+          const code = await scannerRef.current.scanFile(file, false)
+          finish(code)
+        } catch { /* no barcode in this frame — keep scanning */ }
+      }, 'image/jpeg', 0.85)
+    }, 300) // ~3 frames per second
   }
 
   return (
     <div className="fixed inset-0 z-50 bg-black flex flex-col">
-      {/* Hidden div required by Html5Qrcode even for file scanning */}
-      <div id="_offscreen_scanner_" style={{ display: 'none' }} />
+      {/* Hidden elements required by html5-qrcode */}
+      <div id="_qr_hidden_" style={{ display: 'none' }} />
+      <canvas ref={canvasRef} style={{ display: 'none' }} />
 
       {/* Header */}
-      <div className="shrink-0 flex items-center justify-between px-4 pt-safe py-3 bg-black/80">
+      <div className="shrink-0 flex items-center justify-between px-4 py-3 bg-black/70">
         <button onClick={onClose} className="p-2 rounded-full hover:bg-white/10 active:bg-white/20">
           <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12"/>
@@ -112,9 +126,21 @@ export default function BarcodeScanner({ onDetected, onClose }) {
         <div className="w-10" />
       </div>
 
-      {/* ── Real-time view ── */}
-      {mode === 'realtime' && !error && (
+      {/* Camera view or error */}
+      {error ? (
+        <div className="flex-1 flex flex-col items-center justify-center px-8 text-center gap-5">
+          <p className="text-5xl">📷</p>
+          <p className="text-white font-medium text-base">{error}</p>
+          <button
+            onClick={onClose}
+            className="bg-white/10 text-white rounded-xl px-6 py-3 text-sm font-medium"
+          >
+            Search by name instead
+          </button>
+        </div>
+      ) : (
         <div className="flex-1 relative overflow-hidden">
+          {/* Live camera feed */}
           <video
             ref={videoRef}
             className="absolute inset-0 w-full h-full object-cover"
@@ -124,12 +150,13 @@ export default function BarcodeScanner({ onDetected, onClose }) {
 
           {/* Aim overlay */}
           <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-            {/* Darken area outside the scan box */}
+            {/* Darken outside the target box */}
             <div className="absolute inset-0" style={{
-              background: 'rgba(0,0,0,0.45)',
-              WebkitMaskImage: 'radial-gradient(340px 160px at 50% 50%, transparent 55%, black 80%)',
-              maskImage: 'radial-gradient(340px 160px at 50% 50%, transparent 55%, black 80%)',
+              background: 'rgba(0,0,0,0.5)',
+              WebkitMaskImage: 'radial-gradient(330px 155px at 50% 50%, transparent 58%, black 82%)',
+              maskImage: 'radial-gradient(330px 155px at 50% 50%, transparent 58%, black 82%)',
             }} />
+            {/* Corner brackets */}
             <div className="relative w-72 h-36">
               {[
                 'top-0 left-0 border-t-[3px] border-l-[3px]',
@@ -139,76 +166,31 @@ export default function BarcodeScanner({ onDetected, onClose }) {
               ].map((cls, i) => (
                 <span key={i} className={`absolute w-7 h-7 border-green-400 ${cls}`} />
               ))}
-              <div className="absolute inset-x-2 top-1/2 h-px bg-green-400 shadow-[0_0_8px_2px_rgba(74,222,128,0.7)] animate-pulse" />
+              {/* Animated scan line */}
+              <div
+                className="absolute inset-x-3 h-0.5 bg-green-400"
+                style={{
+                  boxShadow: '0 0 8px 2px rgba(74,222,128,0.7)',
+                  animation: 'scanline 1.8s ease-in-out infinite',
+                }}
+              />
             </div>
           </div>
         </div>
       )}
 
-      {/* ── Photo fallback ── */}
-      {mode === 'photo' && !photoLoading && (
-        <div className="flex-1 flex flex-col items-center justify-center px-8 text-center gap-4">
-          <div className="w-20 h-20 bg-white/10 rounded-3xl flex items-center justify-center text-4xl">
-            📷
-          </div>
-          <div>
-            <p className="text-white font-semibold text-lg">Take a photo of the barcode</p>
-            <p className="text-white/50 text-sm mt-1">
-              Your browser doesn't support live scanning — take a clear photo instead
-            </p>
-          </div>
-          {error && (
-            <p className="text-red-400 text-sm bg-red-900/30 rounded-xl px-4 py-3">{error}</p>
-          )}
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            className="w-full bg-green-500 hover:bg-green-600 active:bg-green-700 text-white font-semibold rounded-2xl py-4 text-base transition-colors"
-          >
-            Take Photo / Choose Image
-          </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            capture="environment"
-            onChange={handlePhoto}
-            className="hidden"
-          />
-          <button onClick={onClose} className="text-white/40 text-sm">
-            Search by name instead
-          </button>
-        </div>
-      )}
-
-      {/* ── Processing photo ── */}
-      {photoLoading && (
-        <div className="flex-1 flex flex-col items-center justify-center gap-4">
-          <div className="w-10 h-10 border-4 border-green-400 border-t-transparent rounded-full animate-spin" />
-          <p className="text-white/70 text-sm">Reading barcode…</p>
-        </div>
-      )}
-
-      {/* ── Camera error on real-time path ── */}
-      {mode === 'realtime' && error && (
-        <div className="flex-1 flex flex-col items-center justify-center px-8 text-center gap-4">
-          <p className="text-4xl">📷</p>
-          <p className="text-white font-medium">{error}</p>
-          <button
-            onClick={() => { setError(''); setMode('photo') }}
-            className="bg-white/10 text-white rounded-xl px-6 py-3 text-sm font-medium"
-          >
-            Try photo instead
-          </button>
-          <button onClick={onClose} className="text-white/40 text-sm">Search by name</button>
-        </div>
-      )}
-
-      {/* Hint text */}
-      {mode === 'realtime' && !error && (
-        <p className="shrink-0 text-center text-white/40 text-xs py-4 pb-safe">
-          Hold steady — align barcode within the frame
+      {!error && (
+        <p className="shrink-0 text-center text-white/40 text-xs py-4">
+          Align the barcode within the frame
         </p>
       )}
+
+      <style>{`
+        @keyframes scanline {
+          0%, 100% { top: 10%; }
+          50% { top: 85%; }
+        }
+      `}</style>
     </div>
   )
 }
@@ -216,10 +198,10 @@ export default function BarcodeScanner({ onDetected, onClose }) {
 const describeError = (err) => {
   const msg = String(err?.message || err)
   if (/NotAllowed|Permission|denied/i.test(msg))
-    return 'Camera access was denied. Please allow camera permission in your browser settings.'
-  if (/NotFound|no camera/i.test(msg))
+    return 'Camera access denied. Please allow camera permission in your browser settings, then try again.'
+  if (/NotFound|Devices not found/i.test(msg))
     return 'No camera found on this device.'
   if (location.protocol === 'http:')
-    return 'Camera requires HTTPS. This works on your Vercel deployment — on local dev, use the photo option instead.'
-  return 'Could not start the camera.'
+    return 'Camera requires HTTPS. This works on your Vercel deployment. On local dev, try from your phone using the Vercel URL.'
+  return 'Could not start the camera. Try searching by name instead.'
 }
