@@ -1,11 +1,26 @@
 @import "tailwindcss";
 
-html, body, #root {
+/* Use dynamic viewport height so the app fills screen correctly
+   even with mobile browser chrome (address bar, keyboard) */
+html, body {
   height: 100%;
+  margin: 0;
+}
+
+#root {
+  height: 100%;
+  /* dvh accounts for mobile browser UI collapsing/expanding */
+  min-height: -webkit-fill-available;
 }
 
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   -webkit-font-smoothing: antialiased;
   -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+}
+
+/* iOS safe area helpers */
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom);
 }

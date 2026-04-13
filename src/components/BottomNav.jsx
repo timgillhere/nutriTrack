@@ -45,14 +45,17 @@ const TABS = [
 
 export default function BottomNav({ active, onChange }) {
   return (
-    <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-100 z-30 safe-bottom">
-      <div className="flex max-w-lg mx-auto">
+    <nav
+      className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-100 z-30"
+      style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
+    >
+      <div className="flex h-16">
         {TABS.map(tab => (
           <button
             key={tab.id}
             onClick={() => onChange(tab.id)}
-            className={`flex-1 flex flex-col items-center py-2.5 gap-0.5 transition-colors ${
-              active === tab.id ? '' : 'hover:bg-gray-50'
+            className={`flex-1 flex flex-col items-center justify-center gap-0.5 transition-colors ${
+              active === tab.id ? '' : 'hover:bg-gray-50 active:bg-gray-100'
             }`}
           >
             {tab.icon(active === tab.id)}
@@ -62,8 +65,6 @@ export default function BottomNav({ active, onChange }) {
           </button>
         ))}
       </div>
-      {/* iPhone home bar padding */}
-      <div className="h-safe-bottom" />
     </nav>
   )
 }

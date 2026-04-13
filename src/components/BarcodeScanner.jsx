@@ -1,55 +1,59 @@
 import { useEffect, useRef, useState } from 'react'
 import { Html5Qrcode } from 'html5-qrcode'
 
-// Barcode formats recognised by the native BarcodeDetector API
-const NATIVE_FORMATS = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'itf']
+/**
+ * BarcodeDetector support matrix:
+ *   Chrome / Edge (Android + desktop)  ✅  real-time
+ *   Safari 17.4+ (iOS + macOS)         ✅  real-time
+ *   Firefox                            ❌  → photo fallback
+ *   Chrome on iOS                      ❌  (uses WebKit < 17.4 on older devices) → photo fallback
+ *
+ * Photo fallback: user taps "Take Photo", selects/captures image,
+ * html5-qrcode scans the static image file. Works on every browser.
+ */
+
+const EAN_FORMATS = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'itf']
 
 export default function BarcodeScanner({ onDetected, onClose }) {
   const videoRef = useRef(null)
   const streamRef = useRef(null)
   const rafRef = useRef(null)
-  const detectedRef = useRef(false)
-  const fallbackRef = useRef(null)
+  const doneRef = useRef(false)
+
+  const [mode, setMode] = useState(null)  // 'realtime' | 'photo' | null
   const [error, setError] = useState('')
-  const [mode, setMode] = useState(null) // 'native' | 'fallback' | null
+  const [photoLoading, setPhotoLoading] = useState(false)
+  const fileInputRef = useRef(null)
 
   useEffect(() => {
-    const supportsNative = 'BarcodeDetector' in window
-
-    if (supportsNative) {
-      startNative()
+    if ('BarcodeDetector' in window) {
+      startRealtime()
     } else {
-      startFallback()
+      setMode('photo')
     }
-
-    return () => {
-      cleanup()
-    }
+    return stop
   }, [])
 
-  const cleanup = () => {
+  const stop = () => {
+    doneRef.current = true
     cancelAnimationFrame(rafRef.current)
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(t => t.stop())
-    }
-    if (fallbackRef.current) {
-      fallbackRef.current.stop().catch(() => {})
-    }
+    streamRef.current?.getTracks().forEach(t => t.stop())
   }
 
-  const handleDetected = (code) => {
-    if (detectedRef.current) return
-    detectedRef.current = true
-    cleanup()
+  const finish = (code) => {
+    if (doneRef.current) return
+    doneRef.current = true
+    stop()
     onDetected(code)
   }
 
-  // --- Native BarcodeDetector path (Chrome on Android, Safari 17+) ---
-  const startNative = async () => {
-    setMode('native')
+  // ── Real-time path (BarcodeDetector + getUserMedia) ───────────────────────
+  const startRealtime = async () => {
+    setMode('realtime')
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } },
+        audio: false,
       })
       streamRef.current = stream
       if (videoRef.current) {
@@ -57,139 +61,165 @@ export default function BarcodeScanner({ onDetected, onClose }) {
         await videoRef.current.play()
       }
 
-      const detector = new window.BarcodeDetector({ formats: NATIVE_FORMATS })
+      const detector = new window.BarcodeDetector({ formats: EAN_FORMATS })
 
-      const scan = async () => {
-        if (detectedRef.current) return
-        if (videoRef.current?.readyState === 4) {
+      const tick = async () => {
+        if (doneRef.current) return
+        if (videoRef.current?.readyState >= 2) {
           try {
-            const barcodes = await detector.detect(videoRef.current)
-            if (barcodes.length > 0) {
-              handleDetected(barcodes[0].rawValue)
-              return
-            }
-          } catch { /* continue scanning */ }
+            const found = await detector.detect(videoRef.current)
+            if (found.length) { finish(found[0].rawValue); return }
+          } catch { /* no result this frame */ }
         }
-        rafRef.current = requestAnimationFrame(scan)
+        rafRef.current = requestAnimationFrame(tick)
       }
-      rafRef.current = requestAnimationFrame(scan)
+      rafRef.current = requestAnimationFrame(tick)
     } catch (err) {
-      setError(cameraError(err))
+      setError(describeError(err))
     }
   }
 
-  // --- html5-qrcode fallback path (Firefox, older Safari) ---
-  const startFallback = () => {
-    setMode('fallback')
-    const containerId = 'qr-fallback-container'
-
-    // Slight delay so the DOM node is mounted
-    setTimeout(() => {
-      const scanner = new Html5Qrcode(containerId)
-      fallbackRef.current = scanner
-
-      scanner
-        .start(
-          { facingMode: 'environment' },
-          { fps: 15, qrbox: { width: 280, height: 160 }, aspectRatio: 1.7 },
-          handleDetected,
-          () => {}
-        )
-        .catch((err) => setError(cameraError(err)))
-    }, 100)
+  // ── Photo fallback (file input → Html5Qrcode.scanFile) ────────────────────
+  const handlePhoto = async (e) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setPhotoLoading(true)
+    try {
+      const scanner = new Html5Qrcode('_offscreen_scanner_')
+      const result = await scanner.scanFile(file, false)
+      finish(result)
+    } catch {
+      setError('No barcode found in that photo — try again closer to the barcode, with good lighting.')
+      setPhotoLoading(false)
+    }
+    // reset input so the same file can be retried
+    if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
   return (
     <div className="fixed inset-0 z-50 bg-black flex flex-col">
+      {/* Hidden div required by Html5Qrcode even for file scanning */}
+      <div id="_offscreen_scanner_" style={{ display: 'none' }} />
+
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 bg-black/80">
-        <button onClick={onClose} className="text-white p-2 rounded-full hover:bg-white/10">
-          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <div className="shrink-0 flex items-center justify-between px-4 pt-safe py-3 bg-black/80">
+        <button onClick={onClose} className="p-2 rounded-full hover:bg-white/10 active:bg-white/20">
+          <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12"/>
           </svg>
         </button>
-        <span className="text-white font-medium">Scan Barcode</span>
+        <span className="text-white font-semibold">Scan Barcode</span>
         <div className="w-10" />
       </div>
 
-      {/* Camera / error area */}
-      {error ? (
-        <div className="flex-1 flex flex-col items-center justify-center px-8 text-center gap-4">
-          <div className="text-5xl">📷</div>
-          <p className="text-white font-medium">{error}</p>
-          <button
-            onClick={onClose}
-            className="bg-white/10 text-white rounded-xl px-6 py-3 text-sm font-medium"
-          >
-            Go back &amp; search by name instead
-          </button>
-        </div>
-      ) : (
+      {/* ── Real-time view ── */}
+      {mode === 'realtime' && !error && (
         <div className="flex-1 relative overflow-hidden">
-          {/* Native path: plain <video> */}
-          {mode === 'native' && (
-            <video
-              ref={videoRef}
-              className="absolute inset-0 w-full h-full object-cover"
-              playsInline
-              muted
-            />
-          )}
-
-          {/* Fallback path: html5-qrcode manages its own video */}
-          {mode === 'fallback' && (
-            <div id="qr-fallback-container" className="w-full h-full" />
-          )}
+          <video
+            ref={videoRef}
+            className="absolute inset-0 w-full h-full object-cover"
+            playsInline
+            muted
+          />
 
           {/* Aim overlay */}
           <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-            {/* Dark vignette outside the scan box */}
-            <div className="absolute inset-0 bg-black/40" style={{
-              WebkitMaskImage: 'radial-gradient(ellipse 320px 170px at 50% 50%, transparent 60%, black 100%)',
-              maskImage: 'radial-gradient(ellipse 320px 170px at 50% 50%, transparent 60%, black 100%)',
+            {/* Darken area outside the scan box */}
+            <div className="absolute inset-0" style={{
+              background: 'rgba(0,0,0,0.45)',
+              WebkitMaskImage: 'radial-gradient(340px 160px at 50% 50%, transparent 55%, black 80%)',
+              maskImage: 'radial-gradient(340px 160px at 50% 50%, transparent 55%, black 80%)',
             }} />
-            <div className="relative w-72 h-40">
+            <div className="relative w-72 h-36">
               {[
                 'top-0 left-0 border-t-[3px] border-l-[3px]',
                 'top-0 right-0 border-t-[3px] border-r-[3px]',
                 'bottom-0 left-0 border-b-[3px] border-l-[3px]',
                 'bottom-0 right-0 border-b-[3px] border-r-[3px]',
               ].map((cls, i) => (
-                <span key={i} className={`absolute w-8 h-8 border-green-400 rounded-sm ${cls}`} />
+                <span key={i} className={`absolute w-7 h-7 border-green-400 ${cls}`} />
               ))}
-              {/* Animated scan line */}
-              <div className="absolute left-1 right-1 h-0.5 bg-green-400 shadow-[0_0_8px_2px_rgba(74,222,128,0.6)] animate-[scanline_2s_ease-in-out_infinite]"
-                style={{ top: '50%' }}
-              />
+              <div className="absolute inset-x-2 top-1/2 h-px bg-green-400 shadow-[0_0_8px_2px_rgba(74,222,128,0.7)] animate-pulse" />
             </div>
           </div>
         </div>
       )}
 
-      <p className="text-center text-white/50 text-xs py-4">
-        Hold steady — align the barcode within the frame
-      </p>
+      {/* ── Photo fallback ── */}
+      {mode === 'photo' && !photoLoading && (
+        <div className="flex-1 flex flex-col items-center justify-center px-8 text-center gap-4">
+          <div className="w-20 h-20 bg-white/10 rounded-3xl flex items-center justify-center text-4xl">
+            📷
+          </div>
+          <div>
+            <p className="text-white font-semibold text-lg">Take a photo of the barcode</p>
+            <p className="text-white/50 text-sm mt-1">
+              Your browser doesn't support live scanning — take a clear photo instead
+            </p>
+          </div>
+          {error && (
+            <p className="text-red-400 text-sm bg-red-900/30 rounded-xl px-4 py-3">{error}</p>
+          )}
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="w-full bg-green-500 hover:bg-green-600 active:bg-green-700 text-white font-semibold rounded-2xl py-4 text-base transition-colors"
+          >
+            Take Photo / Choose Image
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            onChange={handlePhoto}
+            className="hidden"
+          />
+          <button onClick={onClose} className="text-white/40 text-sm">
+            Search by name instead
+          </button>
+        </div>
+      )}
 
-      <style>{`
-        @keyframes scanline {
-          0%, 100% { transform: translateY(-32px); }
-          50% { transform: translateY(32px); }
-        }
-      `}</style>
+      {/* ── Processing photo ── */}
+      {photoLoading && (
+        <div className="flex-1 flex flex-col items-center justify-center gap-4">
+          <div className="w-10 h-10 border-4 border-green-400 border-t-transparent rounded-full animate-spin" />
+          <p className="text-white/70 text-sm">Reading barcode…</p>
+        </div>
+      )}
+
+      {/* ── Camera error on real-time path ── */}
+      {mode === 'realtime' && error && (
+        <div className="flex-1 flex flex-col items-center justify-center px-8 text-center gap-4">
+          <p className="text-4xl">📷</p>
+          <p className="text-white font-medium">{error}</p>
+          <button
+            onClick={() => { setError(''); setMode('photo') }}
+            className="bg-white/10 text-white rounded-xl px-6 py-3 text-sm font-medium"
+          >
+            Try photo instead
+          </button>
+          <button onClick={onClose} className="text-white/40 text-sm">Search by name</button>
+        </div>
+      )}
+
+      {/* Hint text */}
+      {mode === 'realtime' && !error && (
+        <p className="shrink-0 text-center text-white/40 text-xs py-4 pb-safe">
+          Hold steady — align barcode within the frame
+        </p>
+      )}
     </div>
   )
 }
 
-const cameraError = (err) => {
-  const msg = err?.message || String(err)
-  if (msg.includes('NotAllowedError') || msg.includes('Permission')) {
-    return 'Camera permission denied. Please allow camera access in your browser settings and try again.'
-  }
-  if (msg.includes('NotFoundError') || msg.includes('no camera')) {
+const describeError = (err) => {
+  const msg = String(err?.message || err)
+  if (/NotAllowed|Permission|denied/i.test(msg))
+    return 'Camera access was denied. Please allow camera permission in your browser settings.'
+  if (/NotFound|no camera/i.test(msg))
     return 'No camera found on this device.'
-  }
-  if (location.protocol === 'http:') {
-    return 'Camera requires a secure connection (HTTPS). This works on your Vercel deployment — try searching by name for now.'
-  }
-  return 'Could not start the camera. Try searching by name instead.'
+  if (location.protocol === 'http:')
+    return 'Camera requires HTTPS. This works on your Vercel deployment — on local dev, use the photo option instead.'
+  return 'Could not start the camera.'
 }
